@@ -93,9 +93,14 @@ class SemanticMCPToolFilter:
         description: str
 
         if isinstance(tool, dict):
-            # OpenAI function format
-            name = tool.get("name", "")
-            description = tool.get("description", name)
+            if "function" in tool and isinstance(tool["function"], dict):
+                # OpenAI chat completions format: {"type": "function", "function": {"name": "...", "description": "..."}}
+                name = tool["function"].get("name", "")
+                description = tool["function"].get("description", name)
+            else:
+                # OpenAI flat format or responses format
+                name = tool.get("name", "")
+                description = tool.get("description", name)
         else:
             # MCPTool object
             name = str(tool.name)
