@@ -113,7 +113,7 @@ async def test_semantic_filter_basic_filtering():
     )
 
     # Build router with the tools before filtering
-    filter_instance._build_router(tools)
+    await filter_instance._build_router(tools)
 
     # Filter tools with email-related query
     filtered = await filter_instance.filter_tools(
@@ -196,7 +196,7 @@ async def test_semantic_filter_top_k_limiting():
     )
 
     # Build router with the tools before filtering
-    filter_instance._build_router(tools)
+    await filter_instance._build_router(tools)
 
     # Filter tools
     filtered = await filter_instance.filter_tools(
@@ -372,7 +372,7 @@ async def test_semantic_filter_hook_triggers_on_completion():
     ]
 
     # Build router with the tools before filtering
-    filter_instance._build_router(tools)
+    await filter_instance._build_router(tools)
 
     # Create hook
     hook = SemanticToolFilterHook(filter_instance)

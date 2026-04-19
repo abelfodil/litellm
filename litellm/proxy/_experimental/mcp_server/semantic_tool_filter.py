@@ -81,7 +81,7 @@ class SemanticMCPToolFilter:
             verbose_logger.info(
                 f"Fetched {len(all_tools)} tools from {len(registry)} MCP servers"
             )
-            self._build_router(all_tools)
+            await self._build_router(all_tools)
 
         except Exception as e:
             verbose_logger.error(f"Failed to build router from MCP registry: {e}")
@@ -109,39 +109,18 @@ class SemanticMCPToolFilter:
 
         return name, description
 
-    def _build_router(self, tools: List) -> None:
+    async def _build_router(self, tools: List) -> None:
         """Build semantic router with tools (MCPTool objects or OpenAI function dicts)."""
         from semantic_router.routers import SemanticRouter
-        from semantic_router.routers.base import Route
 
         from litellm.router_strategy.auto_router.litellm_encoder import (
             LiteLLMRouterEncoder,
         )
 
-        if not tools:
-            self.tool_router = None
-            return
-
         try:
-            # Convert tools to routes
-            routes = []
             self._tool_map = {}
-
-            for tool in tools:
-                name, description = self._extract_tool_info(tool)
-                self._tool_map[name] = tool
-
-                routes.append(
-                    Route(
-                        name=name,
-                        description=description,
-                        utterances=textwrap.wrap(description, width=4000),
-                        score_threshold=self.similarity_threshold,
-                    )
-                )
-
             self.tool_router = SemanticRouter(
-                routes=routes,
+                routes=[],
                 encoder=LiteLLMRouterEncoder(
                     litellm_router_instance=self.router_instance,
                     model_name=self.embedding_model,
@@ -150,12 +129,67 @@ class SemanticMCPToolFilter:
                 auto_sync="local",
             )
 
-            verbose_logger.info(f"Built semantic router with {len(routes)} tools")
+            if tools:
+                await self._add_new_tools_to_router(tools)
+
+            verbose_logger.info(f"Built semantic router with {len(tools)} tools")
 
         except Exception as e:
             verbose_logger.error(f"Failed to build semantic router: {e}")
             self.tool_router = None
             raise
+
+    async def _add_new_tools_to_router(self, tools: List[Any]) -> None:
+        """Add new tools to the semantic router on the fly."""
+        from semantic_router.routers.base import Route
+
+        if not tools:
+            return
+
+        if self.tool_router is None:
+            await self._build_router(tools)
+            return
+
+        new_routes = []
+        temp_tool_map = {}
+        for tool in tools:
+            name, description = self._extract_tool_info(tool)
+            if name in self._tool_map:
+                continue
+
+            temp_tool_map[name] = tool
+            new_routes.append(
+                Route(
+                    name=name,
+                    description=description,
+                    utterances=textwrap.wrap(description, width=4000),
+                    score_threshold=self.similarity_threshold,
+                )
+            )
+
+        if not new_routes:
+            return
+
+        try:
+            self.tool_router.add(new_routes)
+
+            self._tool_map.update(temp_tool_map)
+
+            verbose_logger.info(f"Added {len(new_routes)} new tools to semantic router")
+        except Exception as e:
+            verbose_logger.error(f"Failed to add new tools to semantic router: {e}")
+
+    async def sync_tools_to_router(self, tools: List[Any]) -> None:
+        """Ensure all provided tools are in the semantic router."""
+        new_tools = []
+        for tool in tools:
+            name, _ = self._extract_tool_info(tool)
+            if name not in self._tool_map:
+                new_tools.append(tool)
+
+        if new_tools:
+            verbose_logger.debug(f"Adding {len(new_tools)} new tools to semantic filter")
+            await self._add_new_tools_to_router(new_tools)
 
     async def filter_tools(
         self,
@@ -184,23 +218,26 @@ class SemanticMCPToolFilter:
         if not query or not query.strip():
             return available_tools
 
-        # Router should be built on startup - if not, something went wrong
         if self.tool_router is None:
             verbose_logger.warning(
-                "Router not initialized - was build_router_from_mcp_registry() called on startup?"
+                "Router not initialized and failed to build on the fly"
             )
             return available_tools
 
-        # Run semantic filtering
+        await self.sync_tools_to_router(available_tools)
+
         try:
             limit = top_k or self.top_k
-            matches = self.tool_router(text=query, limit=limit)
+            matches = self.tool_router(text=query, limit=None)
+
             matched_tool_names = self._extract_tool_names_from_matches(matches)
 
             if not matched_tool_names:
                 return available_tools
 
-            return self._get_tools_by_names(matched_tool_names, available_tools)
+            ordered_tools = self._get_tools_by_names(matched_tool_names, available_tools)
+
+            return ordered_tools[:limit]
 
         except Exception as e:
             verbose_logger.error(f"Semantic tool filter failed: {e}", exc_info=True)

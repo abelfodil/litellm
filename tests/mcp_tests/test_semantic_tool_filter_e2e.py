@@ -104,7 +104,7 @@ async def test_e2e_semantic_filter():
     ]
 
     # Build router with test tools
-    filter_instance._build_router(tools)
+    await filter_instance._build_router(tools)
 
     hook = SemanticToolFilterHook(filter_instance)
 
