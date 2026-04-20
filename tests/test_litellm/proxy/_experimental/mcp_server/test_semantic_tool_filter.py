@@ -848,15 +848,166 @@ async def test_duplicate_tools_not_re_added():
 
 
 def test_extract_user_query_returns_last_user_message():
-    """extract_user_query returns the LAST user message, not the first."""
+    """extract_user_query returns the most recent user message."""
     from litellm.proxy._experimental.mcp_server.semantic_tool_filter import (
         SemanticMCPToolFilter,
     )
 
     f = SemanticMCPToolFilter(embedding_model="x", litellm_router_instance=Mock())
+
+    # Returns the last user message only
     messages = [
-        {"role": "user", "content": "first message"},
-        {"role": "assistant", "content": "response"},
-        {"role": "user", "content": "last message"},
+        {"role": "user", "content": "turn the lights off in the office"},
+        {"role": "assistant", "content": "done"},
+        {"role": "user", "content": "try again"},
     ]
-    assert f.extract_user_query(messages) == "last message"
+    query = f.extract_user_query(messages)
+    assert query == "try again"
+
+    # Works with a single message
+    query2 = f.extract_user_query([{"role": "user", "content": "send email"}])
+    assert query2 == "send email"
+
+    # Returns empty string when no user messages
+    assert f.extract_user_query([{"role": "assistant", "content": "hi"}]) == ""
+
+
+# ---------------------------------------------------------------------------
+# rewrite_query tests
+# ---------------------------------------------------------------------------
+
+def _make_completion_response(text: str):
+    """Build a minimal mock ModelResponse for acompletion."""
+    from unittest.mock import MagicMock
+    response = MagicMock()
+    response.choices[0].message.content = text
+    return response
+
+
+@pytest.mark.asyncio
+async def test_rewrite_query_uses_configured_model():
+    """When query_rewrite_model is set, acompletion is called with that model."""
+    from litellm.proxy._experimental.mcp_server.semantic_tool_filter import (
+        SemanticMCPToolFilter,
+    )
+
+    mock_router = Mock()
+    mock_router.acompletion = AsyncMock(
+        return_value=_make_completion_response("turn off office lights")
+    )
+
+    f = SemanticMCPToolFilter(
+        embedding_model="text-embedding-3-small",
+        litellm_router_instance=mock_router,
+        query_rewrite_model="gpt-4o-mini",
+    )
+
+    messages = [
+        {"role": "user", "content": "turn the lights off in the office"},
+        {"role": "assistant", "content": "done"},
+        {"role": "user", "content": "try again"},
+    ]
+    # Hook resolves model = query_rewrite_model or data["model"] and passes it explicitly
+    result = await f.rewrite_query(messages, "try again", model="gpt-4o-mini")
+
+    assert result == "turn off office lights"
+    call_kwargs = mock_router.acompletion.call_args
+    assert call_kwargs.kwargs["model"] == "gpt-4o-mini"
+    assert call_kwargs.kwargs["max_tokens"] == 2048
+
+
+@pytest.mark.asyncio
+async def test_rewrite_query_uses_request_model_as_fallback():
+    """The hook resolves the model (query_rewrite_model or request model) and passes it."""
+    from litellm.proxy._experimental.mcp_server.semantic_tool_filter import (
+        SemanticMCPToolFilter,
+    )
+
+    mock_router = Mock()
+    mock_router.acompletion = AsyncMock(
+        return_value=_make_completion_response("retry turning off office lights")
+    )
+
+    f = SemanticMCPToolFilter(
+        embedding_model="text-embedding-3-small",
+        litellm_router_instance=mock_router,
+        query_rewrite_model=None,
+    )
+
+    # Caller (hook) resolves model = query_rewrite_model or data["model"]
+    result = await f.rewrite_query(
+        [{"role": "user", "content": "try again"}],
+        "try again",
+        model="gemma4-4B-128k",
+    )
+
+    assert result == "retry turning off office lights"
+    assert mock_router.acompletion.call_args.kwargs["model"] == "gemma4-4B-128k"
+
+
+
+@pytest.mark.asyncio
+async def test_rewrite_query_skipped_when_disabled():
+    """When query_rewrite_enabled=False, acompletion is never called regardless of model."""
+    from litellm.proxy._experimental.mcp_server.semantic_tool_filter import (
+        SemanticMCPToolFilter,
+    )
+
+    mock_router = Mock()
+    mock_router.acompletion = AsyncMock()
+
+    f = SemanticMCPToolFilter(
+        embedding_model="text-embedding-3-small",
+        litellm_router_instance=mock_router,
+        query_rewrite_model="gpt-4o-mini",
+        query_rewrite_enabled=False,
+    )
+
+    result = await f.rewrite_query([], "try again", model="some-model")
+
+    assert result == "try again"
+    mock_router.acompletion.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_rewrite_query_falls_back_on_error():
+    """If acompletion raises, raw_query is returned and filtering is not blocked."""
+    from litellm.proxy._experimental.mcp_server.semantic_tool_filter import (
+        SemanticMCPToolFilter,
+    )
+
+    mock_router = Mock()
+    mock_router.acompletion = AsyncMock(side_effect=RuntimeError("API down"))
+
+    f = SemanticMCPToolFilter(
+        embedding_model="text-embedding-3-small",
+        litellm_router_instance=mock_router,
+        query_rewrite_model="gpt-4o-mini",
+    )
+
+    result = await f.rewrite_query([], "try again", model="gpt-4o-mini")
+    assert result == "try again"
+
+
+@pytest.mark.asyncio
+async def test_rewrite_query_uses_model_param():
+    """rewrite_query uses exactly the model passed in — model resolution is the hook's job."""
+    from litellm.proxy._experimental.mcp_server.semantic_tool_filter import (
+        SemanticMCPToolFilter,
+    )
+
+    mock_router = Mock()
+    mock_router.acompletion = AsyncMock(
+        return_value=_make_completion_response("rewritten")
+    )
+
+    f = SemanticMCPToolFilter(
+        embedding_model="text-embedding-3-small",
+        litellm_router_instance=mock_router,
+        query_rewrite_model="dedicated-rewrite-model",
+    )
+
+    # The hook resolves: model = self.filter.query_rewrite_model or data["model"]
+    # Here we simulate what the hook passes after resolution.
+    await f.rewrite_query([], "q", model="dedicated-rewrite-model")
+    assert mock_router.acompletion.call_args.kwargs["model"] == "dedicated-rewrite-model"

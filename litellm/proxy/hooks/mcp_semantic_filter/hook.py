@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 from litellm._logging import verbose_proxy_logger
 from litellm.constants import (
     DEFAULT_MCP_SEMANTIC_FILTER_EMBEDDING_MODEL,
+    DEFAULT_MCP_SEMANTIC_FILTER_QUERY_REWRITE_ENABLED,
+    DEFAULT_MCP_SEMANTIC_FILTER_QUERY_REWRITE_MODEL,
     DEFAULT_MCP_SEMANTIC_FILTER_SIMILARITY_THRESHOLD,
     DEFAULT_MCP_SEMANTIC_FILTER_TOP_K,
 )
@@ -242,6 +244,11 @@ class SemanticToolFilterHook(CustomLogger):
                 )
                 return None
 
+            rewrite_model = self.filter.query_rewrite_model or data.get("model")
+            user_query = await self.filter.rewrite_query(
+                messages, user_query, model=rewrite_model
+            )
+
             verbose_proxy_logger.debug(
                 f"Applying semantic filter to {len(tools)} tools "
                 f"with query: '{user_query[:50]}...'"
@@ -369,6 +376,12 @@ class SemanticToolFilterHook(CustomLogger):
             similarity_threshold = config.get(
                 "similarity_threshold", DEFAULT_MCP_SEMANTIC_FILTER_SIMILARITY_THRESHOLD
             )
+            query_rewrite_model = config.get(
+                "query_rewrite_model", DEFAULT_MCP_SEMANTIC_FILTER_QUERY_REWRITE_MODEL
+            )
+            query_rewrite_enabled = config.get(
+                "query_rewrite_enabled", DEFAULT_MCP_SEMANTIC_FILTER_QUERY_REWRITE_ENABLED
+            )
 
             semantic_filter = SemanticMCPToolFilter(
                 embedding_model=embedding_model,
@@ -376,6 +389,8 @@ class SemanticToolFilterHook(CustomLogger):
                 top_k=top_k,
                 similarity_threshold=similarity_threshold,
                 enabled=True,
+                query_rewrite_model=query_rewrite_model,
+                query_rewrite_enabled=query_rewrite_enabled,
             )
 
             # Build router from MCP registry on startup

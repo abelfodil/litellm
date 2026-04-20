@@ -26,6 +26,8 @@ class SemanticMCPToolFilter:
         top_k: int = 10,
         similarity_threshold: float = 0.3,
         enabled: bool = True,
+        query_rewrite_model: Optional[str] = None,
+        query_rewrite_enabled: bool = True,
     ):
         """
         Initialize the semantic tool filter.
@@ -36,12 +38,18 @@ class SemanticMCPToolFilter:
             top_k: Maximum number of tools to return
             similarity_threshold: Minimum similarity score for filtering
             enabled: Whether filtering is enabled
+            query_rewrite_model: Model to use for query rewriting. Defaults to the model
+                being called in the request when not set.
+            query_rewrite_enabled: Whether to rewrite queries before semantic matching.
+                Enabled by default. Disable to skip the LLM rewrite call entirely.
         """
         self.enabled = enabled
         self.top_k = top_k
         self.similarity_threshold = similarity_threshold
         self.embedding_model = embedding_model
         self.router_instance = litellm_router_instance
+        self.query_rewrite_model = query_rewrite_model
+        self.query_rewrite_enabled = query_rewrite_enabled
         self.tool_router: Optional["SemanticRouter"] = None
         self._tool_map: Dict[str, Any] = {}  # MCPTool objects or OpenAI function dicts
 
@@ -341,6 +349,41 @@ class SemanticMCPToolFilter:
                 matched.append(tool)
                 used_ids.add(id(tool))
         return matched
+
+    async def rewrite_query(
+        self,
+        messages: List[Dict[str, Any]],
+        raw_query: str,
+        model: Optional[str] = None,
+    ) -> str:
+        """Rewrite raw_query into a self-contained search query using conversation context.
+
+        Falls back to raw_query on any error so filtering is never blocked.
+        """
+        if not self.query_rewrite_enabled:
+            return raw_query
+        try:
+            response = await self.router_instance.acompletion(
+                model=model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Rewrite the last user message as a short, self-contained "
+                            "search query that captures the full intent given the "
+                            "conversation context. Output only the rewritten query, "
+                            "no explanation."
+                        ),
+                    },
+                    *messages,
+                ],
+                max_tokens=2048,
+            )
+            rewritten = response.choices[0].message.content or raw_query
+            return rewritten.strip()
+        except Exception as e:
+            verbose_logger.warning(f"Query rewrite failed, using raw query: {e}")
+            return raw_query
 
     def extract_user_query(self, messages: List[Dict[str, Any]]) -> str:
         """
