@@ -4,6 +4,7 @@ Semantic MCP Tool Filtering using semantic-router
 Filters MCP tools semantically for /chat/completions and /responses endpoints.
 """
 
+import textwrap
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from litellm._logging import verbose_logger
@@ -134,7 +135,7 @@ class SemanticMCPToolFilter:
                     Route(
                         name=name,
                         description=description,
-                        utterances=[description],
+                        utterances=textwrap.wrap(description, width=4000),
                         score_threshold=self.similarity_threshold,
                     )
                 )

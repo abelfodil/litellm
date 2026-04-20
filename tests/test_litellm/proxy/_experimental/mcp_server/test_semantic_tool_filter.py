@@ -743,3 +743,120 @@ async def test_semantic_filter_hook_converts_to_chat_format_for_completion():
         ), "acompletion: tools should be converted to chat format with 'function' key"
 
     print("✅ Hook correctly converts to chat format for completion, leaves flat for responses")
+
+
+def test_chunk_description_short():
+    """Short descriptions are returned as a single chunk without splitting."""
+    import textwrap
+
+    desc = "Send an email via Gmail."
+    chunks = textwrap.wrap(desc, width=4000)
+    assert chunks == [desc]
+
+
+def test_chunk_description_long():
+    """Long descriptions are split into multiple chunks, each within 4000 chars."""
+    import textwrap
+
+    desc = "This tool does something useful. " * 500
+    assert len(desc) > 4000 * 2
+    chunks = textwrap.wrap(desc, width=4000)
+    assert len(chunks) > 1, "Long description should produce multiple chunks"
+    for chunk in chunks:
+        assert len(chunk) <= 4000, f"Chunk exceeds 4000 chars: {len(chunk)}"
+
+
+@pytest.mark.asyncio
+async def test_long_description_produces_multiple_utterances():
+    """A tool with a very long description should create a route with multiple utterances."""
+    from litellm.proxy._experimental.mcp_server.semantic_tool_filter import (
+        SemanticMCPToolFilter,
+    )
+    from litellm.types.utils import Embedding, EmbeddingResponse
+
+    mock_router = Mock()
+
+    def mock_embedding_sync(*args, **kwargs):
+        n = len(kwargs.get("input", args[0] if args else []))
+        return EmbeddingResponse(
+            data=[
+                Embedding(embedding=[0.1] * 1536, index=i, object="embedding")
+                for i in range(n)
+            ],
+            model="text-embedding-3-small",
+            object="list",
+            usage={"prompt_tokens": 10, "total_tokens": 10},
+        )
+
+    async def mock_embedding_async(*args, **kwargs):
+        return mock_embedding_sync(*args, **kwargs)
+
+    mock_router.embedding = mock_embedding_sync
+    mock_router.aembedding = mock_embedding_async
+
+    f = SemanticMCPToolFilter(
+        embedding_model="text-embedding-3-small",
+        litellm_router_instance=mock_router,
+    )
+    await f._build_router([])
+
+    long_desc = "This tool retrieves important metrics. " * 200  # ~7600 chars > 4000
+    tool = MCPTool(name="big_tool", description=long_desc, inputSchema={"type": "object"})
+    await f._add_new_tools_to_router([tool])
+
+    route = next(r for r in f.tool_router.routes if r.name == "big_tool")
+    assert len(route.utterances) > 1, "Long description should produce multiple utterances"
+    for utt in route.utterances:
+        assert len(utt) <= 4000, f"Utterance exceeds 4000 chars: {len(utt)}"
+
+
+@pytest.mark.asyncio
+async def test_duplicate_tools_not_re_added():
+    """Tools already in the router are not re-indexed on subsequent filter calls."""
+    from litellm.proxy._experimental.mcp_server.semantic_tool_filter import (
+        SemanticMCPToolFilter,
+    )
+    from litellm.types.utils import Embedding, EmbeddingResponse
+
+    mock_router = Mock()
+
+    def mock_embedding_sync(*args, **kwargs):
+        return EmbeddingResponse(
+            data=[Embedding(embedding=[0.1] * 1536, index=0, object="embedding")],
+            model="text-embedding-3-small",
+            object="list",
+            usage={"prompt_tokens": 10, "total_tokens": 10},
+        )
+
+    async def mock_embedding_async(*args, **kwargs):
+        return mock_embedding_sync()
+
+    mock_router.embedding = mock_embedding_sync
+    mock_router.aembedding = mock_embedding_async
+
+    tools = [MCPTool(name="my_tool", description="Does a thing", inputSchema={"type": "object"})]
+
+    f = SemanticMCPToolFilter(
+        embedding_model="text-embedding-3-small",
+        litellm_router_instance=mock_router,
+    )
+    await f._build_router(tools)
+    route_count_before = len(f.tool_router.routes)
+
+    await f.sync_tools_to_router(tools)  # same tools again
+    assert len(f.tool_router.routes) == route_count_before, "Duplicate tools should not be re-added"
+
+
+def test_extract_user_query_returns_last_user_message():
+    """extract_user_query returns the LAST user message, not the first."""
+    from litellm.proxy._experimental.mcp_server.semantic_tool_filter import (
+        SemanticMCPToolFilter,
+    )
+
+    f = SemanticMCPToolFilter(embedding_model="x", litellm_router_instance=Mock())
+    messages = [
+        {"role": "user", "content": "first message"},
+        {"role": "assistant", "content": "response"},
+        {"role": "user", "content": "last message"},
+    ]
+    assert f.extract_user_query(messages) == "last message"
